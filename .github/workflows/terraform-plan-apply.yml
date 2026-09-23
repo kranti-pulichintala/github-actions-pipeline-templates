@@ -1,0 +1,129 @@
+# Reusable Terraform plan and apply pipeline with PR comments
+# Plan runs when the caller runs on pull requests, apply runs when the
+# caller runs on pushes to main. AWS authentication uses OIDC via
+# aws-actions/configure-aws-credentials so no long-lived keys are needed.
+name: Reusable Terraform Plan and Apply
+
+"on":
+  workflow_call:
+    inputs:
+      working_directory:
+        description: Directory that contains the Terraform configuration
+        required: false
+        default: .
+        type: string
+      terraform_version:
+        description: Terraform version to install
+        required: false
+        default: 1.9.0
+        type: string
+      aws_region:
+        description: AWS region for the Terraform run
+        required: false
+        default: us-east-1
+        type: string
+      role_to_assume:
+        description: IAM role ARN to assume via OIDC
+        required: false
+        type: string
+    secrets:
+      AWS_ROLE_TO_ASSUME:
+        description: IAM role ARN to assume via OIDC (preferred over the input)
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  plan:
+    name: Terraform plan
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME || inputs.role_to_assume }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform plan
+        id: plan
+        run: terraform plan -input=false -no-color -out=tfplan
+        continue-on-error: true
+
+      - name: Comment plan on pull request
+        uses: actions/github-script@v7
+        env:
+          PLAN: ${{ steps.plan.outputs.stdout }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const output = `#### Terraform Plan \`${{ steps.plan.outcome }}\` (directory \`${{ inputs.working_directory }}\`)
+            <details><summary>Show plan output</summary>
+
+            \`\`\`terraform
+            ${process.env.PLAN}
+            \`\`\`
+
+            </details>
+            *Triggered by @${{ github.actor }}, workflow run \`${{ github.run_id }}\`*`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+      - name: Fail if plan failed
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+  apply:
+    name: Terraform apply
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME || inputs.role_to_assume }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform apply
+        run: terraform apply -input=false -auto-approve

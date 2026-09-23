@@ -1,0 +1,74 @@
+# Reusable Python CI pipeline with linting, formatting, and coverage
+# Runs across a matrix of Python versions so callers catch version-specific
+# issues early. Uploads the coverage report as an artifact for review.
+name: Reusable Python CI
+
+"on":
+  workflow_call:
+    inputs:
+      python_versions:
+        description: JSON array of Python versions to test (for example '["3.11", "3.12"]')
+        required: false
+        default: '["3.11", "3.12"]'
+        type: string
+      working_directory:
+        description: Directory that contains the Python project
+        required: false
+        default: .
+        type: string
+      requirements_file:
+        description: Requirements file to install before running tests
+        required: false
+        default: requirements.txt
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint and test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ${{ fromJSON(inputs.python_versions) }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f "${{ inputs.requirements_file }}" ]; then
+            pip install -r "${{ inputs.requirements_file }}"
+          fi
+          pip install ruff pytest pytest-cov
+
+      - name: Lint with Ruff
+        working-directory: ${{ inputs.working_directory }}
+        run: ruff check .
+
+      - name: Check formatting with Ruff
+        working-directory: ${{ inputs.working_directory }}
+        run: ruff format --check .
+
+      - name: Run tests with coverage
+        working-directory: ${{ inputs.working_directory }}
+        run: pytest --cov=. --cov-report=xml:coverage-${{ matrix.python-version }}.xml --cov-report=term
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report-${{ matrix.python-version }}
+          path: ${{ inputs.working_directory }}/coverage-${{ matrix.python-version }}.xml
+          retention-days: 30

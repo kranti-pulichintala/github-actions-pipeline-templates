@@ -1,0 +1,112 @@
+# Reusable Docker build, push, and vulnerability-scan pipeline
+# Call this workflow from any repository that needs a container image
+# built, pushed to a registry, and scanned before it ships.
+name: Reusable Docker Build and Push
+
+"on":
+  workflow_call:
+    inputs:
+      image_name:
+        description: Name of the image, without the registry prefix (for example "myorg/api")
+        required: true
+        type: string
+      dockerfile:
+        description: Path to the Dockerfile, relative to the repo root
+        required: false
+        default: Dockerfile
+        type: string
+      context:
+        description: Docker build context directory
+        required: false
+        default: .
+        type: string
+      registry:
+        description: Container registry host (for example ghcr.io, or a private registry)
+        required: false
+        default: ghcr.io
+        type: string
+      tag:
+        description: Tag strategy - "sha" tags with the short commit SHA, "latest" tags latest
+        required: false
+        default: sha
+        type: string
+    secrets:
+      GITHUB_TOKEN:
+        description: GitHub token used to authenticate to the registry
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+
+jobs:
+  build:
+    name: Build, push, and scan image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Resolve image tag
+        id: meta
+        run: |
+          if [ "${{ inputs.tag }}" = "latest" ]; then
+            TAG="latest"
+          else
+            TAG="${GITHUB_SHA::8}"
+          fi
+          IMAGE="${{ inputs.registry }}/${{ inputs.image_name }}:${TAG}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "Building image: ${IMAGE}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Alternative login for Amazon ECR, kept as a reference.
+      # Enable it when pushing to ECR instead of GHCR, and provide the
+      # registry input as your account's ECR URL. Requires AWS credentials
+      # via OIDC or environment secrets before this step.
+      #
+      # - name: Log in to Amazon ECR
+      #   uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: ${{ steps.meta.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.29.0
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      - name: Upload Trivy scan results to code scanning
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
